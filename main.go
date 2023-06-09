@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -120,8 +121,8 @@ func main() {
 	ctx := context.Background()
 	dataChan := make(chan *LogData)
 
-	// Maps block height to a list of entries, each identifying the recorded
-	// root hash per pods.
+	// Map the blockheight to a list of `RootHashRecord` that store the pod name
+	// and reported root hash.
 	rootCache := make(map[int][]RootHashRecord)
 
 	go func() {
@@ -131,16 +132,23 @@ func main() {
 	}()
 
 	for data := range dataChan {
-
 		record := RootHashRecord{
 			PodName: data.PodName,
 			Root:    data.Root,
 		}
-		if _, exists := rootCache[data.Height]; exists {
+
+		log.Print(data.PodName, " has root ", data.Root, " at height ", data.Height)
+
+		if prev, exists := rootCache[data.Height]; exists {
+			if prev[0].Root != record.Root {
+				err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", data.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
+				log.Fatalf(err_str)
+			}
+
 			rootCache[data.Height] = append(rootCache[data.Height], record)
 		} else {
 			rootCache[data.Height] = []RootHashRecord{record}
 		}
-		fmt.Println(data.PodName, "has root", data.Root, "at height", data.Height)
+
 	}
 }
