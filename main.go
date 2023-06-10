@@ -1,17 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 
 	logging "cloud.google.com/go/logging/apiv2"
-	loggingpb "google.golang.org/genproto/googleapis/logging/v2"
+	"cloud.google.com/go/logging/apiv2/loggingpb"
 )
+
+type LogEntry struct {
+	metadata map[string]string
+	payload  string
+}
 
 type LogData struct {
 	Height  int
@@ -26,7 +35,7 @@ type RootHashRecord struct {
 	Root    string
 }
 
-func parseLogEntry(logEntry string) (*LogData, error) {
+func parseCommitLog(podName, logEntry string) (*LogData, error) {
 	re := regexp.MustCompile(`finalizing commit of block\s+module=consensus height=(\d+) hash=([0-9a-fA-F]+) root=([0-9a-fA-F]+) num_txs=(\d+)`)
 	match := re.FindStringSubmatch(logEntry)
 
@@ -55,7 +64,7 @@ func parseLogEntry(logEntry string) (*LogData, error) {
 	}, nil
 }
 
-func tailLogs(ctx context.Context, projectID string, out chan<- *LogData) error {
+func streamLogsWithFilter(ctx context.Context, projectID string, filter string, out chan<- LogEntry) error {
 	client, err := logging.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("NewClient error: %v", err)
@@ -66,8 +75,6 @@ func tailLogs(ctx context.Context, projectID string, out chan<- *LogData) error 
 		client.Close()
 		return fmt.Errorf("TailLogEntries error: %v", err)
 	}
-
-	filter := fmt.Sprintf(`resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn"`)
 
 	req := &loggingpb.TailLogEntriesRequest{
 		ResourceNames: []string{
@@ -93,15 +100,14 @@ func tailLogs(ctx context.Context, projectID string, out chan<- *LogData) error 
 		}
 
 		for _, entry := range resp.Entries {
-			logData, err := parseLogEntry(entry.GetTextPayload())
-			if err != nil {
-				continue
+
+			metadata := entry.GetResource().GetLabels()
+			payload := entry.GetTextPayload()
+
+			out <- LogEntry{
+				metadata: metadata,
+				payload:  payload,
 			}
-
-			podName := entry.GetResource().GetLabels()["pod_name"]
-			logData.PodName = podName
-
-			out <- logData
 		}
 	}
 
@@ -111,6 +117,18 @@ func tailLogs(ctx context.Context, projectID string, out chan<- *LogData) error 
 	return nil
 }
 
+func postToDiscord(msg string) {
+	webhookUrl := os.Getenv("DISCORD_WEBHOOK")
+
+	payload := map[string]interface{}{
+		"content": msg,
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+
+	http.Post(webhookUrl, "application/json", bytes.NewBuffer(payloadBytes))
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run main.go PROJECT_ID")
@@ -118,37 +136,81 @@ func main() {
 	}
 
 	projectID := os.Args[1]
-	ctx := context.Background()
-	dataChan := make(chan *LogData)
+	var wg sync.WaitGroup
 
-	// Map the blockheight to a list of `RootHashRecord` that store the pod name
-	// and reported root hash.
-	rootCache := make(map[int][]RootHashRecord)
-
+	wg.Add(1)
 	go func() {
-		if err := tailLogs(ctx, projectID, dataChan); err != nil {
-			fmt.Println("tailLogs error:", err)
+		defer wg.Done()
+		// Map the block height to a list of `RootHashRecord` that store the pod name
+		// and reported root hash.
+		rootCache := make(map[int][]RootHashRecord)
+		ctx := context.Background()
+		commitLogs := make(chan LogEntry)
+
+		filter := `resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn"`
+		if err := streamLogsWithFilter(ctx, projectID, filter, commitLogs); err != nil {
+			fmt.Println(" error:", err)
+		}
+
+		for logEntry := range commitLogs {
+			podName, exists := logEntry.metadata["pod_name"]
+			if !exists {
+				continue
+			}
+
+			commitLog, err := parseCommitLog(podName, logEntry.payload)
+			if err != nil {
+				continue
+			}
+
+			record := RootHashRecord{
+				PodName: commitLog.PodName,
+				Root:    commitLog.Root,
+			}
+
+			log_msg := fmt.Sprintf("%s, at height %d, has apphash %s", commitLog.PodName, commitLog.Height, commitLog.Root)
+			log.Print(log_msg)
+
+			if commitLog.Height%4320 == 0 {
+				postToDiscord(log_msg)
+			}
+
+			if prev, exists := rootCache[commitLog.Height]; exists {
+				if prev[0].Root != record.Root {
+					err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", commitLog.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
+					disc_msg := fmt.Sprintf("@erwanor : %s", err_str)
+					postToDiscord(disc_msg)
+					log.Fatal(err_str)
+				}
+
+				rootCache[commitLog.Height] = append(rootCache[commitLog.Height], record)
+			} else {
+				rootCache[commitLog.Height] = []RootHashRecord{record}
+			}
+
 		}
 	}()
 
-	for data := range dataChan {
-		record := RootHashRecord{
-			PodName: data.PodName,
-			Root:    data.Root,
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ctx := context.Background()
+		errorLogs := make(chan LogEntry)
+
+		filter := `resource.labels.container_name="pd" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn" AND severity>=ERROR`
+		if err := streamLogsWithFilter(ctx, projectID, filter, errorLogs); err != nil {
+			fmt.Println(" error:", err)
 		}
 
-		log.Print(data.PodName, " has root ", data.Root, " at height ", data.Height)
-
-		if prev, exists := rootCache[data.Height]; exists {
-			if prev[0].Root != record.Root {
-				err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", data.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
-				log.Fatalf(err_str)
+		for logEntry := range errorLogs {
+			podName, exists := logEntry.metadata["pod_name"]
+			if !exists {
+				continue
 			}
 
-			rootCache[data.Height] = append(rootCache[data.Height], record)
-		} else {
-			rootCache[data.Height] = []RootHashRecord{record}
+			postToDiscord(fmt.Sprintf("%s: %s", podName, logEntry.payload))
 		}
+	}()
 
-	}
+	wg.Wait()
 }

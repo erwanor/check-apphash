@@ -2,10 +2,7 @@ module github.com/erwanor/check-apphash
 
 go 1.19
 
-require (
-	cloud.google.com/go/logging v1.7.0
-	google.golang.org/genproto v0.0.0-20230530153820-e85fd2cbaebc
-)
+require cloud.google.com/go/logging v1.7.0
 
 require (
 	cloud.google.com/go v0.110.0 // indirect
@@ -24,6 +21,7 @@ require (
 	golang.org/x/text v0.8.0 // indirect
 	google.golang.org/api v0.114.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
+	google.golang.org/genproto v0.0.0-20230530153820-e85fd2cbaebc // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20230526203410-71b5a4ffd15e // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20230526203410-71b5a4ffd15e // indirect
 	google.golang.org/grpc v1.55.0 // indirect
