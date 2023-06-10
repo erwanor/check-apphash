@@ -15,6 +15,7 @@ import (
 
 	logging "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/logging/apiv2/loggingpb"
+	"google.golang.org/api/option"
 )
 
 type LogEntry struct {
@@ -57,24 +58,29 @@ func parseCommitLog(podName, logEntry string) (*LogData, error) {
 	}
 
 	return &LogData{
-		Height: height,
-		Hash:   hash,
-		Root:   root,
-		NumTxs: numTxs,
+		Height:  height,
+		Hash:    hash,
+		Root:    root,
+		NumTxs:  numTxs,
+		PodName: podName,
 	}, nil
 }
 
 func streamLogsWithFilter(ctx context.Context, projectID string, filter string, out chan<- LogEntry) error {
-	client, err := logging.NewClient(ctx)
+	client, err := logging.NewClient(ctx, option.WithCredentialsJSON([]byte(os.Getenv("GCP_CREDENTIALS"))))
 	if err != nil {
 		return fmt.Errorf("NewClient error: %v", err)
 	}
+
+	log.Print("connected to GCP")
 
 	stream, err := client.TailLogEntries(ctx)
 	if err != nil {
 		client.Close()
 		return fmt.Errorf("TailLogEntries error: %v", err)
 	}
+
+	log.Print("established stream")
 
 	req := &loggingpb.TailLogEntriesRequest{
 		ResourceNames: []string{
@@ -100,7 +106,6 @@ func streamLogsWithFilter(ctx context.Context, projectID string, filter string, 
 		}
 
 		for _, entry := range resp.Entries {
-
 			metadata := entry.GetResource().GetLabels()
 			payload := entry.GetTextPayload()
 
@@ -118,7 +123,7 @@ func streamLogsWithFilter(ctx context.Context, projectID string, filter string, 
 }
 
 func postToDiscord(msg string) {
-	webhookUrl := os.Getenv("DISCORD_WEBHOOK")
+	webhookUrl := os.Getenv("DISCORD_WEBHOOK_URL")
 
 	payload := map[string]interface{}{
 		"content": msg,
@@ -130,27 +135,39 @@ func postToDiscord(msg string) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go PROJECT_ID")
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		fmt.Println("GCP PROJECT_ID is not set or empty")
 		os.Exit(1)
+	} else if os.Getenv("DISCORD_WEBHOOK_URL") == "" {
+		fmt.Println("DISCORD_WEBHOOK_URL is unset or empty")
+		os.Exit(1)
+	} else if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
+		fmt.Println("GOOGLE_APPLICATION_CREDENTIALS is unset or empty")
+		os.Exit(1)
+	} else if os.Getenv("GCP_CREDENTIALS") == "" {
+		fmt.Println("GCP_CREDENTIALS is unset or empty")
+		os.Exit(1)
+	} else {
+		log.Print("log relayer starting up!")
 	}
 
-	projectID := os.Args[1]
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Print("started tm worker")
 		// Map the block height to a list of `RootHashRecord` that store the pod name
 		// and reported root hash.
 		rootCache := make(map[int][]RootHashRecord)
 		ctx := context.Background()
 		commitLogs := make(chan LogEntry)
 
+		confirmedHeight := 0
+
 		filter := `resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn"`
-		if err := streamLogsWithFilter(ctx, projectID, filter, commitLogs); err != nil {
-			fmt.Println(" error:", err)
-		}
+		go streamLogsWithFilter(ctx, projectID, filter, commitLogs)
 
 		for logEntry := range commitLogs {
 			podName, exists := logEntry.metadata["pod_name"]
@@ -171,19 +188,27 @@ func main() {
 			log_msg := fmt.Sprintf("%s, at height %d, has apphash %s", commitLog.PodName, commitLog.Height, commitLog.Root)
 			log.Print(log_msg)
 
-			if commitLog.Height%4320 == 0 {
-				postToDiscord(log_msg)
-			}
+			discord_msg := fmt.Sprintf("**%s**, at height **%d**, has apphash _%s_", commitLog.PodName, commitLog.Height, commitLog.Root)
+			postToDiscord(discord_msg)
 
 			if prev, exists := rootCache[commitLog.Height]; exists {
-				if prev[0].Root != record.Root {
+				if commitLog.Height < confirmedHeight {
+					msg := fmt.Sprintf("detected chain restart, current height=%d, previous tip: height=%d, %s:%s and %s:%s", commitLog.Height, confirmedHeight, prev[0].PodName, prev[0].Root, prev[1].PodName, prev[1].Root)
+					postToDiscord(msg)
+					rootCache = map[int][]RootHashRecord{
+						commitLog.Height: {record},
+					}
+					continue
+				} else if prev[0].Root != record.Root {
 					err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", commitLog.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
 					disc_msg := fmt.Sprintf("@erwanor : %s", err_str)
 					postToDiscord(disc_msg)
 					log.Fatal(err_str)
+				} else {
 				}
 
 				rootCache[commitLog.Height] = append(rootCache[commitLog.Height], record)
+				confirmedHeight = commitLog.Height
 			} else {
 				rootCache[commitLog.Height] = []RootHashRecord{record}
 			}
@@ -194,21 +219,22 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Print("started pd worker")
 		ctx := context.Background()
 		errorLogs := make(chan LogEntry)
 
 		filter := `resource.labels.container_name="pd" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn" AND severity>=ERROR`
-		if err := streamLogsWithFilter(ctx, projectID, filter, errorLogs); err != nil {
-			fmt.Println(" error:", err)
-		}
+		go streamLogsWithFilter(ctx, projectID, filter, errorLogs)
 
 		for logEntry := range errorLogs {
 			podName, exists := logEntry.metadata["pod_name"]
 			if !exists {
+				log.Print("pod name not found!")
 				continue
 			}
 
-			postToDiscord(fmt.Sprintf("%s: %s", podName, logEntry.payload))
+			msg := fmt.Sprintf("%s: %s", podName, logEntry.payload)
+			postToDiscord(msg)
 		}
 	}()
 
