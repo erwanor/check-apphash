@@ -188,8 +188,10 @@ func main() {
 			log_msg := fmt.Sprintf("%s, at height %d, has apphash %s", commitLog.PodName, commitLog.Height, commitLog.Root)
 			log.Print(log_msg)
 
-			discord_msg := fmt.Sprintf("**%s**, at height **%d**, has apphash _%s_", commitLog.PodName, commitLog.Height, commitLog.Root)
-			postToDiscord(discord_msg)
+			if commitLog.Height%4320 == 0 {
+				discord_msg := fmt.Sprintf("**%s**, at height **%d**, has apphash _%s_", commitLog.PodName, commitLog.Height, commitLog.Root)
+				postToDiscord(discord_msg)
+			}
 
 			if prev, exists := rootCache[commitLog.Height]; exists {
 				if commitLog.Height < confirmedHeight {
