@@ -92,16 +92,17 @@ func streamLogsWithFilter(ctx context.Context, projectID string, filter string, 
 	if err := stream.Send(req); err != nil {
 		stream.CloseSend()
 		client.Close()
-		return fmt.Errorf("stream.Send error: %v", err)
+		log.Fatal("stream.Send error: %v", err)
 	}
 
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {
+			log.Print("stream EOF")
 			break
 		}
 		if err != nil {
-			fmt.Println("stream.Recv error:", err)
+			log.Print("stream.Recv error:", err)
 			break
 		}
 
@@ -119,6 +120,7 @@ func streamLogsWithFilter(ctx context.Context, projectID string, filter string, 
 	close(out)
 	stream.CloseSend()
 	client.Close()
+	log.Print("terminating routine")
 	return nil
 }
 
