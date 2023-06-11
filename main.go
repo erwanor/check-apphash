@@ -196,28 +196,30 @@ func main() {
 			}
 
 			if prev, exists := rootCache[commitLog.Height]; exists {
+				// Detect a chain restart
 				if commitLog.Height < confirmedHeight {
 					msg := fmt.Sprintf("detected chain restart, current height=%d, previous tip: height=%d, %s:%s and %s:%s", commitLog.Height, confirmedHeight, prev[0].PodName, prev[0].Root, prev[1].PodName, prev[1].Root)
 					postToDiscord(msg)
+					log.Print(msg)
 					rootCache = map[int][]RootHashRecord{
 						commitLog.Height: {record},
 					}
 					continue
-				} else if prev[0].Root != record.Root {
+				} else if prev[0].Root != record.Root { // Apphash mismatch
 					err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", commitLog.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
 					disc_msg := fmt.Sprintf("@erwanor : %s", err_str)
 					postToDiscord(disc_msg)
 					log.Fatal(err_str)
 				} else {
+					rootCache[commitLog.Height] = append(rootCache[commitLog.Height], record)
+					confirmedHeight = commitLog.Height
 				}
-
-				rootCache[commitLog.Height] = append(rootCache[commitLog.Height], record)
-				confirmedHeight = commitLog.Height
 			} else {
 				rootCache[commitLog.Height] = []RootHashRecord{record}
 			}
 
 		}
+		log.Print("tm worker exiting")
 	}()
 
 	wg.Add(1)
@@ -240,7 +242,9 @@ func main() {
 			msg := fmt.Sprintf("%s: %s", podName, logEntry.payload)
 			postToDiscord(msg)
 		}
+		log.Print("pd worker exiting")
 	}()
 
 	wg.Wait()
+	log.Print("exiting")
 }
