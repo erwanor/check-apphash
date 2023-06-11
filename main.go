@@ -245,6 +245,15 @@ func main() {
 		log.Print("pd worker exiting")
 	}()
 
+	// Digital ocean deploy fails unless it can ping a health endpoint
+	go func() {
+		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "OK")
+		})
+		log.Fatal(http.ListenAndServe(":8080", nil))
+	}()
+
 	wg.Wait()
 	log.Print("exiting")
 }
