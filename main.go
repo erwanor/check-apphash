@@ -171,7 +171,7 @@ func main() {
 		ctx := context.Background()
 		commitLogs := make(chan LogEntry)
 
-		filter := fmt.Sprintf(`resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name="penumbra-%s"`, os.Getenv("PENUMBRA_NETWORK"))
+		filter := fmt.Sprintf(`resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-%s"`, os.Getenv("PENUMBRA_NETWORK"))
 		log.Print("tm filter: ", filter)
 
 		go streamLogsWithFilter(ctx, projectID, filter, commitLogs)
