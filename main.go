@@ -150,6 +150,9 @@ func main() {
 	} else if os.Getenv("GCP_CREDENTIALS") == "" {
 		fmt.Println("GCP_CREDENTIALS is unset or empty")
 		os.Exit(1)
+	} else if os.Getenv("PENUMBRA_NETWORK") == "" {
+		fmt.Println("PENUMBRA_NETWORK is unset or empty")
+		os.Exit(1)
 	} else {
 		log.Print("log relayer starting up!")
 	}
@@ -159,16 +162,15 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Print("started tm worker")
+		log.Print("started tm log relay")
 		// Map the block height to a list of `RootHashRecord` that store the pod name
 		// and reported root hash.
 		rootCache := make(map[int][]RootHashRecord)
 		ctx := context.Background()
 		commitLogs := make(chan LogEntry)
 
-		confirmedHeight := 0
+		filter := fmt.Sprintf(`resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name="penumbra-%s"`, os.Getenv("PENUMBRA_NETWORK"))
 
-		filter := `resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn"`
 		go streamLogsWithFilter(ctx, projectID, filter, commitLogs)
 
 		for logEntry := range commitLogs {
@@ -190,29 +192,36 @@ func main() {
 			log_msg := fmt.Sprintf("%s, at height %d, has apphash %s", commitLog.PodName, commitLog.Height, commitLog.Root)
 			log.Print(log_msg)
 
-			if commitLog.Height%4320 == 0 {
+			if commitLog.Height%1000 == 0 {
 				discord_msg := fmt.Sprintf("**%s**, at height **%d**, has apphash _%s_", commitLog.PodName, commitLog.Height, commitLog.Root)
 				postToDiscord(discord_msg)
 			}
 
 			if prev, exists := rootCache[commitLog.Height]; exists {
 				// Detect a chain restart
-				if commitLog.Height < confirmedHeight {
-					msg := fmt.Sprintf("detected chain restart, current height=%d, previous tip: height=%d, %s:%s and %s:%s", commitLog.Height, confirmedHeight, prev[0].PodName, prev[0].Root, prev[1].PodName, prev[1].Root)
-					postToDiscord(msg)
-					log.Print(msg)
-					rootCache = map[int][]RootHashRecord{
-						commitLog.Height: {record},
-					}
-					continue
-				} else if prev[0].Root != record.Root { // Apphash mismatch
-					err_str := fmt.Sprintf("root mismatch detected at height %d, between:\n%s: %s\n%s: %s\n", commitLog.Height, prev[0].PodName, prev[0].Root, record.PodName, record.Root)
+				// Note: this isn't actually correct because logs can be delivered
+				// out-of-order or duplicated. We can handle the duplication by keeping
+				// a sliding cache of records that we have seen.
+				// To detect a chain restart, we should instead lean onto the fact that
+				// pod ids are randomly generated.
+				// if commitLog.Height < confirmedHeight {
+				// msg := fmt.Sprintf("detected chain restart, current height=%d, previous tip: height=%d, %s:%s and %s:%s", commitLog.Height, confirmedHeight, prev[0].PodName, prev[0].Root, prev[1].PodName, prev[1].Root)
+				// postToDiscord(msg)
+				// log.Print(msg)
+				// rootCache = map[int][]RootHashRecord{
+				// 	commitLog.Height: {record},
+				// }
+				// continue
+				// } else if ...
+				if checkRootHashes(record, prev) {
+					record_str := knownRootHashesString(prev)
+					err_str := fmt.Sprintf("ROOT MISMATCH DETECTED AT BLOCK %d", commitLog.Height)
+					err_str = fmt.Sprintf("%s\n%s", err_str, record_str)
 					disc_msg := fmt.Sprintf("@erwanor : %s", err_str)
 					postToDiscord(disc_msg)
 					log.Fatal(err_str)
 				} else {
 					rootCache[commitLog.Height] = append(rootCache[commitLog.Height], record)
-					confirmedHeight = commitLog.Height
 				}
 			} else {
 				rootCache[commitLog.Height] = []RootHashRecord{record}
@@ -229,7 +238,7 @@ func main() {
 		ctx := context.Background()
 		errorLogs := make(chan LogEntry)
 
-		filter := `resource.labels.container_name="pd" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-testnet-fn" AND severity>=ERROR`
+		filter := fmt.Sprintf(`resource.labels.container_name="pd" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-%s" AND severity>=ERROR`, os.Getenv("PENUMBRA_NETWORK"))
 		go streamLogsWithFilter(ctx, projectID, filter, errorLogs)
 
 		for logEntry := range errorLogs {
@@ -256,4 +265,26 @@ func main() {
 
 	wg.Wait()
 	log.Print("exiting")
+}
+
+func checkRootHashes(current RootHashRecord, records []RootHashRecord) bool {
+	if len(records) == 0 {
+		return true
+	}
+
+	for record := range records {
+		if current.Root != records[record].Root {
+			return false
+		}
+	}
+
+	return true
+}
+
+func knownRootHashesString(records []RootHashRecord) string {
+	var s string
+	for record := range records {
+		s += fmt.Sprintf("%s: %s\n", records[record].PodName, records[record].Root)
+	}
+	return s
 }
