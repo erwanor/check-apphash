@@ -216,7 +216,7 @@ func main() {
 				// }
 				// continue
 				// } else if ...
-				if checkRootHashes(record, prev) {
+				if !consistentRecords(record, prev) {
 					record_str := knownRootHashesString(prev)
 					err_str := fmt.Sprintf("ROOT MISMATCH DETECTED AT BLOCK %d", commitLog.Height)
 					err_str = fmt.Sprintf("%s\n%s", err_str, record_str)
@@ -271,7 +271,7 @@ func main() {
 	log.Print("exiting")
 }
 
-func checkRootHashes(current RootHashRecord, records []RootHashRecord) bool {
+func consistentRecords(current RootHashRecord, records []RootHashRecord) bool {
 	if len(records) == 0 {
 		return true
 	}
