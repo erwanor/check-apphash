@@ -157,6 +157,8 @@ func main() {
 		log.Print("log relayer starting up!")
 	}
 
+	log.Print("starting log relayer for network: ", os.Getenv("PENUMBRA_NETWORK"))
+
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -170,6 +172,7 @@ func main() {
 		commitLogs := make(chan LogEntry)
 
 		filter := fmt.Sprintf(`resource.labels.container_name="tm" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name="penumbra-%s"`, os.Getenv("PENUMBRA_NETWORK"))
+		log.Print("tm filter: ", filter)
 
 		go streamLogsWithFilter(ctx, projectID, filter, commitLogs)
 
@@ -239,6 +242,7 @@ func main() {
 		errorLogs := make(chan LogEntry)
 
 		filter := fmt.Sprintf(`resource.labels.container_name="pd" AND resource.labels.cluster_name="testnet" AND resource.labels.pod_name:"penumbra-%s" AND severity>=ERROR`, os.Getenv("PENUMBRA_NETWORK"))
+		log.Print("pd filter: ", filter)
 		go streamLogsWithFilter(ctx, projectID, filter, errorLogs)
 
 		for logEntry := range errorLogs {
